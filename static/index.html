@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Personal Finance Tracker</title>
+  <style>
+    body { font-family: -apple-system, Helvetica, Arial, sans-serif; max-width: 900px; margin: 24px auto; padding: 0 16px; color: #222; }
+    h1 { margin-bottom: 2px; } .muted { color: #666; }
+    input, select, button { padding: 9px; font-size: 15px; margin: 3px 0; }
+    button { cursor: pointer; } .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .cards { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; }
+    .card { border: 1px solid #ddd; border-radius: 8px; padding: 10px 16px; min-width: 150px; }
+    .card b { display: block; font-size: 20px; }
+    table { border-collapse: collapse; width: 100%; } th, td { border-bottom: 1px solid #eee; padding: 7px; text-align: left; }
+    .bar { background: #4C72B0; height: 14px; border-radius: 3px; }
+    .alert-over { color: #b00020; font-weight: 600; } .alert-warning { color: #b26a00; }
+    .error { color: #b00020; min-height: 20px; } .hidden { display: none; }
+  </style>
+</head>
+<body>
+  <h1>Personal Finance Tracker</h1>
+  <p class="muted">Track income and spending, see where your money goes, and get budget alerts.</p>
+  <div id="error" class="error"></div>
+
+  <section id="auth">
+    <h2>Sign in</h2>
+    <div class="row">
+      <input id="email" type="email" placeholder="Email">
+      <input id="password" type="password" placeholder="Password (8+ characters)">
+      <button onclick="login()">Log in</button>
+      <button onclick="registerUser()">Register</button>
+    </div>
+  </section>
+
+  <section id="app" class="hidden">
+    <div class="row">
+      <label>Month <input id="month" type="month" onchange="refresh()"></label>
+      <button onclick="logout()">Log out</button>
+    </div>
+    <div class="cards">
+      <div class="card">Income<b id="income">-</b></div>
+      <div class="card">Expenses<b id="expense">-</b></div>
+      <div class="card">Net<b id="net">-</b></div>
+    </div>
+    <div id="alerts"></div>
+
+    <h2>Add transaction</h2>
+    <div class="row">
+      <select id="type"><option value="expense">Expense</option><option value="income">Income</option></select>
+      <input id="category" placeholder="Category (e.g. Food)">
+      <input id="amount" type="number" step="0.01" min="0.01" placeholder="Amount">
+      <input id="date" type="date">
+      <input id="note" placeholder="Note (optional)">
+      <button onclick="addTransaction()">Add</button>
+    </div>
+
+    <h2>Spending by category</h2>
+    <div id="chart"></div>
+
+    <h2>Transactions</h2>
+    <table><thead><tr><th>Date</th><th>Type</th><th>Category</th><th>Amount</th><th>Note</th><th></th></tr></thead><tbody id="rows"></tbody></table>
+
+    <h2>Set a monthly budget</h2>
+    <div class="row">
+      <input id="budgetCategory" placeholder="Category">
+      <input id="budgetLimit" type="number" step="0.01" min="0.01" placeholder="Monthly limit">
+      <button onclick="setBudget()">Save budget</button>
+    </div>
+  </section>
+
+  <script>
+    let token = localStorage.getItem("token");
+    const $ = (id) => document.getElementById(id);
+
+    function showError(message) { $("error").textContent = message || ""; }
+
+    function el(tag, text, className) {            // build elements with textContent, so user text can never run as HTML
+      const e = document.createElement(tag);
+      if (text !== undefined) e.textContent = text;
+      if (className) e.className = className;
+      return e;
+    }
+
+    async function api(path, method = "GET", body) {
+      const headers = { "Content-Type": "application/json" };
+      if (token) headers["Authorization"] = "Bearer " + token;
+      const res = await fetch(path, { method, headers, body: body ? JSON.stringify(body) : undefined });
+      const data = await res.json().catch(() => ({}));
+      if (res.status === 401 && token) { logout(); }
+      if (!res.ok) throw new Error(data.error || "Something went wrong");
+      return data;
+    }
+
+    function setLoggedIn(isIn) {
+      $("auth").classList.toggle("hidden", isIn);
+      $("app").classList.toggle("hidden", !isIn);
+    }
+
+    async function registerUser() {
+      try {
+        showError("");
+        await api("/api/register", "POST", { email: $("email").value, password: $("password").value });
+        await login();
+      } catch (e) { showError(e.message); }
+    }
+
+    async function login() {
+      try {
+        showError("");
+        const data = await api("/api/login", "POST", { email: $("email").value, password: $("password").value });
+        token = data.token;
+        localStorage.setItem("token", token);
+        $("password").value = "";
+        start();
+      } catch (e) { showError(e.message); }
+    }
+
+    function logout() {
+      token = null;
+      localStorage.removeItem("token");
+      setLoggedIn(false);
+    }
+
+    async function refresh() {
+      try {
+        showError("");
+        const month = $("month").value;
+        const [summary, txs] = await Promise.all([api("/api/summary?month=" + month), api("/api/transactions?month=" + month)]);
+        $("income").textContent = summary.income;
+        $("expense").textContent = summary.expense;
+        $("net").textContent = summary.net;
+
+        const alerts = $("alerts");
+        alerts.replaceChildren(...summary.budget_alerts.map(a =>
+          el("div", `${a.status === "over" ? "Over budget" : "Close to budget"}: ${a.category} (${a.spent} of ${a.limit})`, "alert-" + a.status)));
+
+        const chart = $("chart");
+        const max = Math.max(1, ...Object.values(summary.expense_by_category).map(Number));
+        chart.replaceChildren(...Object.entries(summary.expense_by_category).map(([cat, amt]) => {
+          const row = el("div"); row.style.margin = "6px 0";
+          row.append(el("div", `${cat}: ${amt}`));
+          const bar = el("div", undefined, "bar"); bar.style.width = (100 * Number(amt) / max) + "%";
+          row.append(bar);
+          return row;
+        }));
+
+        $("rows").replaceChildren(...txs.map(t => {
+          const tr = el("tr");
+          [t.date, t.type, t.category, t.amount, t.note].forEach(v => tr.append(el("td", v)));
+          const td = el("td"); const btn = el("button", "Delete");
+          btn.onclick = () => deleteTransaction(t.id);
+          td.append(btn); tr.append(td);
+          return tr;
+        }));
+      } catch (e) { showError(e.message); }
+    }
+
+    async function addTransaction() {
+      try {
+        showError("");
+        await api("/api/transactions", "POST", { type: $("type").value, category: $("category").value,
+          amount: $("amount").value, date: $("date").value, note: $("note").value });
+        $("amount").value = ""; $("note").value = "";
+        refresh();
+      } catch (e) { showError(e.message); }
+    }
+
+    async function deleteTransaction(id) {
+      try { await api("/api/transactions/" + id, "DELETE"); refresh(); } catch (e) { showError(e.message); }
+    }
+
+    async function setBudget() {
+      try {
+        showError("");
+        await api("/api/budgets/" + encodeURIComponent($("budgetCategory").value), "PUT", { limit: $("budgetLimit").value });
+        refresh();
+      } catch (e) { showError(e.message); }
+    }
+
+    function start() {
+      const today = new Date().toISOString().slice(0, 10);
+      $("month").value = today.slice(0, 7);
+      $("date").value = today;
+      setLoggedIn(true);
+      refresh();
+    }
+
+    if (token) start(); else setLoggedIn(false);
+  </script>
+</body>
+</html>
